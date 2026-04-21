@@ -67,7 +67,7 @@ export default function AnalyzePage() {
           <form onSubmit={handleAnalyze} className="space-y-6">
             <div>
               <label htmlFor="url" className="block text-sm font-medium text-foreground/80 mb-3">
-                رابط المحتوى (صورة أو فيديو مدعوم في Sightengine)
+                رابط المحتوى (صورة أو فيديو مدعوم في )
               </label>
               <div className="relative">
                 <div className="absolute inset-y-0 right-0 pr-4 flex items-center text-foreground/40 pointer-events-none">

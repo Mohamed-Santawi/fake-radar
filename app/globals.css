@@ -46,3 +46,15 @@ body {
 .animate-scan-line {
   animation: scan-line 3s linear infinite;
 }
+
+/* Global cursor fixes */
+button, 
+a, 
+.cursor-pointer {
+  cursor: pointer !important;
+}
+
+button:disabled {
+  cursor: not-allowed !important;
+  pointer-events: auto !important; /* Allow the cursor to show even if disabled */
+}
