@@ -1,26 +1,48 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #050505;
+  --foreground: #e0e0e0;
+  --radar-green: #00ff41;
+  --radar-dark: #003b00;
+  --primary: #00e53b;
+  --surface: #0a0e0a;
+  --border: #1a2818;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-radar: var(--radar-green);
+  --color-radar-dark: var(--radar-dark);
+  --color-primary: var(--primary);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --font-sans: var(--font-cairo);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  direction: rtl;
+}
+
+@keyframes pulse-radar {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 229, 59, 0.7); }
+  70% { transform: scale(1); box-shadow: 0 0 0 20px rgba(0, 229, 59, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 229, 59, 0); }
+}
+
+.animate-pulse-radar {
+  animation: pulse-radar 2s infinite;
+}
+
+@keyframes scan-line {
+  0% { top: 0; }
+  100% { top: 100%; }
+}
+
+.animate-scan-line {
+  animation: scan-line 3s linear infinite;
 }
