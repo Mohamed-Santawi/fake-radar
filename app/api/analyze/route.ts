@@ -229,9 +229,16 @@ async function handleVideoUrl(url: string, apiUser: string, apiSecret: string) {
 
 export async function POST(request: Request) {
   try {
-    const { url } = await request.json();
+    const { url: rawUrl } = await request.json();
 
-    if (!url || typeof url !== 'string') {
+    if (!rawUrl || typeof rawUrl !== 'string') {
+      return NextResponse.json({ error: 'يرجى إدخال الرابط أولاً' }, { status: 400 });
+    }
+
+    // Browsers silently strip whitespace from pasted URLs; Node fetch doesn't.
+    // Mirror that behavior so a clipboard newline doesn't turn into a 404.
+    const url = rawUrl.replace(/\s+/g, '');
+    if (!url) {
       return NextResponse.json({ error: 'يرجى إدخال الرابط أولاً' }, { status: 400 });
     }
 
