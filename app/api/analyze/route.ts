@@ -269,8 +269,13 @@ async function parseBitmindResponse(res: Response): Promise<ProviderResult> {
   }
 
   // { isAI: boolean, confidence: number (0-1), similarity: number, objectKey: string }
-  const confidence = (data as Record<string, unknown>)?.confidence as number | undefined;
-  if (typeof confidence === 'number') return { ok: true, score: confidence };
+  // `confidence` = how certain the model is in its own prediction, not the raw "is fake" probability.
+  // Real image:  isAI=false, confidence=0.9  → deepfake score = 1 - 0.9 = 0.10
+  // Fake image:  isAI=true,  confidence=0.9  → deepfake score = 0.9
+  const d = data as { isAI?: boolean; confidence?: number };
+  if (typeof d?.confidence === 'number' && typeof d?.isAI === 'boolean') {
+    return { ok: true, score: d.isAI ? d.confidence : 1 - d.confidence };
+  }
   return { ok: false, quota: false, error: 'BitMind: unexpected response shape' };
 }
 
