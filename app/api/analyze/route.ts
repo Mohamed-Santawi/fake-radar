@@ -596,7 +596,7 @@ async function handleImageUrl(url: string) {
   // Phase 1: let providers fetch the URL themselves (faster, no egress).
   const urlResult = await tryUrlMode(url, quotaExhausted);
   if (urlResult) {
-    return NextResponse.json({ type: { deepfake: urlResult.score } });
+    return NextResponse.json({ type: { deepfake: urlResult.score }, provider: urlResult.provider });
   }
 
   // Phase 2: download bytes ourselves, upload to providers.
@@ -605,7 +605,7 @@ async function handleImageUrl(url: string) {
 
   const bytesResult = await tryBytesMode(dl.bytes, dl.contentType, 'image', quotaExhausted);
   if ('score' in bytesResult) {
-    return NextResponse.json({ type: { deepfake: bytesResult.score } });
+    return NextResponse.json({ type: { deepfake: bytesResult.score }, provider: bytesResult.provider });
   }
   return NextResponse.json({ error: bytesResult.error }, { status: 500 });
 }
@@ -618,7 +618,7 @@ async function handleVideoUrl(url: string) {
   if (dl.contentType.startsWith('image/')) {
     const quotaExhausted = new Set<string>();
     const r = await tryBytesMode(dl.bytes, dl.contentType, 'image', quotaExhausted);
-    if ('score' in r) return NextResponse.json({ type: { deepfake: r.score } });
+    if ('score' in r) return NextResponse.json({ type: { deepfake: r.score }, provider: r.provider });
     return NextResponse.json({ error: r.error }, { status: 500 });
   }
 
@@ -641,10 +641,11 @@ async function handleVideoUrl(url: string) {
   // keep retrying an exhausted provider for every subsequent frame.
   const quotaExhausted = new Set<string>();
   const scores: number[] = [];
+  let winningProvider = '';
 
   for (let i = 0; i < frames.length; i++) {
     const r = await tryBytesMode(frames[i], 'image/jpeg', `frame_${i}.jpg`, quotaExhausted);
-    if ('score' in r) scores.push(r.score);
+    if ('score' in r) { scores.push(r.score); if (!winningProvider) winningProvider = r.provider; }
     else console.warn(`Frame ${i} failed:`, r.error);
   }
 
@@ -654,6 +655,7 @@ async function handleVideoUrl(url: string) {
 
   return NextResponse.json({
     type: { deepfake: Math.max(...scores) },
+    provider: winningProvider,
     frames_analyzed: scores.length,
     frames_sampled: frames.length,
   });

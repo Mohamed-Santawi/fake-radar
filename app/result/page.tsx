@@ -18,10 +18,11 @@ function ResultContent() {
 
   const scoreStr = searchParams.get("score");
   const status = searchParams.get("status");
+  const provider = searchParams.get("provider") || "unknown";
 
   const score = scoreStr ? parseFloat(scoreStr) : 0;
   const isFake = status === "fake";
-  
+
   const percentage = Math.round(score * 100);
 
   return (
@@ -79,12 +80,15 @@ function ResultContent() {
                 <span className={`text-xl font-bold ${isFake ? 'text-red-400' : 'text-primary'}`}>{percentage}%</span>
               </div>
               <div className="h-4 w-full bg-background rounded-full overflow-hidden border border-border">
-                <motion.div 
+                <motion.div
                   initial={{ width: 0 }}
                   animate={{ width: `${percentage}%` }}
                   transition={{ delay: 0.8, duration: 1, ease: "easeOut" }}
                   className={`h-full rounded-full ${isFake ? 'bg-red-500' : 'bg-primary'}`}
                 ></motion.div>
+              </div>
+              <div className="mt-3 text-xs text-foreground/40 text-right" dir="rtl">
+                مزود التحليل: <span className="font-mono text-foreground/60">{provider}</span>
               </div>
             </motion.div>
 
@@ -93,7 +97,7 @@ function ResultContent() {
               animate={{ y: 0, opacity: 1 }}
               transition={{ delay: 0.5 }}
             >
-              <Link 
+              <Link
                 href="/analyze" 
                 className="inline-flex items-center gap-2 text-foreground/70 hover:text-white transition-colors bg-surface border border-border px-6 py-3 rounded-xl hover:bg-border/50 cursor-pointer"
               >

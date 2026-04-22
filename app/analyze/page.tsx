@@ -35,8 +35,9 @@ export default function AnalyzePage() {
 
       const deepfakeScore = data.type?.deepfake || 0;
       const isFake = deepfakeScore > 0.5;
+      const provider = data.provider || 'unknown';
 
-      router.push(`/result?score=${deepfakeScore}&status=${isFake ? 'fake' : 'real'}`);
+      router.push(`/result?score=${deepfakeScore}&status=${isFake ? 'fake' : 'real'}&provider=${encodeURIComponent(provider)}`);
     } catch (err: any) {
       console.error(err);
       setError(err.message || "حدث خطأ أثناء الاتصال بالخادم");
