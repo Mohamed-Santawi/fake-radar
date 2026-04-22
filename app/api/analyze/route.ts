@@ -526,29 +526,86 @@ type DownloadResult =
   | { ok: true; bytes: Buffer; contentType: string }
   | { ok: false; status: number; error: string };
 
+const DOWNLOAD_TIMEOUT_MS = 25_000;
+
 async function downloadMedia(url: string): Promise<DownloadResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+
   let res: Response;
   try {
-    res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA } });
-  } catch {
-    return { ok: false, status: 400, error: 'الرابط غير صالح أو لا يمكن الوصول إليه' };
+    res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: controller.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    const isAbort = e instanceof Error && e.name === 'AbortError';
+    return {
+      ok: false,
+      status: 400,
+      error: isAbort
+        ? 'استغرق تحميل الملف وقتاً طويلاً. قد يكون الملف كبيراً جداً أو الرابط بطيء.'
+        : 'الرابط غير صالح أو لا يمكن الوصول إليه',
+    };
   }
+
   if (!res.ok) {
+    clearTimeout(timer);
     return {
       ok: false,
       status: 400,
       error: `تعذر تحميل الملف من المصدر (HTTP ${res.status}). قد يكون الرابط محمياً أو انتهت صلاحيته.`,
     };
   }
+
+  // Reject early if content-length is declared and already too large.
   const declared = Number(res.headers.get('content-length') || 0);
-  if (declared && declared > MAX_PROXY_BYTES) {
-    return { ok: false, status: 413, error: 'حجم الملف أكبر من الحد المسموح (30 ميجابايت). جرب رابطاً أصغر.' };
+  if (declared > MAX_PROXY_BYTES) {
+    clearTimeout(timer);
+    return {
+      ok: false,
+      status: 413,
+      error: `حجم الملف (${Math.round(declared / 1024 / 1024)} ميجابايت) أكبر من الحد المسموح (30 ميجابايت). جرب رابطاً أصغر.`,
+    };
   }
-  const bytes = Buffer.from(await res.arrayBuffer());
-  if (bytes.byteLength > MAX_PROXY_BYTES) {
-    return { ok: false, status: 413, error: 'حجم الملف أكبر من الحد المسموح (30 ميجابايت).' };
+
+  // Stream the body chunk-by-chunk so we catch oversized files even when
+  // content-length is absent (chunked transfer / CDNs that omit the header).
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    const reader = res.body!.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_PROXY_BYTES) {
+        clearTimeout(timer);
+        await reader.cancel();
+        return {
+          ok: false,
+          status: 413,
+          error: 'حجم الملف أكبر من الحد المسموح (30 ميجابايت). جرب رابطاً أصغر.',
+        };
+      }
+      chunks.push(value);
+    }
+  } catch (e) {
+    clearTimeout(timer);
+    const isAbort = e instanceof Error && e.name === 'AbortError';
+    return {
+      ok: false,
+      status: 400,
+      error: isAbort
+        ? 'استغرق تحميل الملف وقتاً طويلاً. قد يكون الملف كبيراً جداً أو الرابط بطيء.'
+        : 'انقطع الاتصال أثناء تحميل الملف.',
+    };
   }
-  return { ok: true, bytes, contentType: res.headers.get('content-type') || 'application/octet-stream' };
+
+  clearTimeout(timer);
+  return {
+    ok: true,
+    bytes: Buffer.concat(chunks),
+    contentType: res.headers.get('content-type') || 'application/octet-stream',
+  };
 }
 
 // ─────────────────────────── Frame extraction ────────────────────────────────
