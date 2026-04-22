@@ -12,7 +12,25 @@
       "Bash(npm install *)",
       "Bash(npm run *)",
       "Bash(xargs -I {} grep -l \"ffmpeg\" {})",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "WebSearch",
+      "WebFetch(domain:docs.thehive.ai)",
+      "WebFetch(domain:sightengine.com)",
+      "WebFetch(domain:www.realitydefender.com)",
+      "WebFetch(domain:docs.bitmind.ai)",
+      "WebFetch(domain:illuminarty.ai)",
+      "WebFetch(domain:docs.realitydefender.com)",
+      "WebFetch(domain:bitmind.ai)",
+      "Bash(cat vercel.json)",
+      "Bash(ls .vercel)",
+      "Bash(vercel --version)",
+      "Bash(vercel env *)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:test-videos.co.uk)",
+      "WebFetch(domain:www.w3schools.com)",
+      "WebFetch(domain:www.learningcontainer.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(git commit *)"
     ]
   }
 }

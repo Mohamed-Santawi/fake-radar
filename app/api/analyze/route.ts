@@ -457,54 +457,47 @@ function activeProviders() {
 }
 
 /**
- * Try URL mode across ALL providers in parallel and return the HIGHEST deepfake
- * score seen. Running all providers (not stopping at the first success) prevents
- * a single provider's false-negative from masking a real deepfake.
- * `quotaExhausted` is mutated so bytes-mode can skip those providers.
- * Returns null when no provider succeeded in URL mode → caller falls back to bytes mode.
+ * Try URL mode across providers in order.
+ * Returns the first successful score, skipping providers whose quota is exhausted.
+ * Returns null when no provider succeeded → caller falls back to bytes mode.
+ * `quotaExhausted` is mutated so bytes-mode can skip those providers too.
  */
 async function tryUrlMode(
   url: string,
   quotaExhausted: Set<string>,
 ): Promise<{ score: number; provider: string } | null> {
-  const urlProviders = activeProviders().filter((p) => !!p.scoreUrl);
-  if (urlProviders.length === 0) return null;
-
-  // Run all URL-capable providers in parallel.
-  const settled = await Promise.allSettled(
-    urlProviders.map(async (p) => ({ p, r: await p.scoreUrl!(url) })),
-  );
-
-  let bestScore = -1;
-  let bestProvider = '';
-
-  for (const item of settled) {
-    if (item.status === 'rejected') {
-      console.warn('Provider URL mode threw:', item.reason);
+  for (const p of activeProviders()) {
+    if (!p.scoreUrl) continue;
+    let r: ProviderResult;
+    try {
+      r = await p.scoreUrl(url);
+    } catch (e) {
+      console.warn(`${p.name} scoreUrl threw:`, e);
       continue;
     }
-    const { p, r } = item.value;
 
-    if (r.ok) {
-      if (r.score > bestScore) { bestScore = r.score; bestProvider = p.name; }
-      continue;
-    }
+    if (r.ok) return { score: r.score, provider: p.name };
+
     if (r.quota) {
-      console.warn(`${p.name}: quota exhausted`);
+      console.warn(`${p.name}: quota exhausted, trying next provider`);
       quotaExhausted.add(p.name);
       continue;
     }
-    // url_fetch_failure or hard parse error — skip; bytes-mode will retry.
-    if (r.error !== 'url_fetch_failure') console.warn(`${p.name} scoreUrl error:`, r.error);
-  }
 
-  return bestScore >= 0 ? { score: bestScore, provider: bestProvider } : null;
+    if (r.error === 'url_fetch_failure') {
+      // URL is unreachable — fall back to bytes mode.
+      return null;
+    }
+
+    // Hard provider error — log and continue.
+    console.warn(`${p.name} scoreUrl error:`, r.error);
+  }
+  return null;
 }
 
 /**
- * Try bytes mode across ALL providers sequentially, skipping quota-exhausted ones,
- * and return the HIGHEST deepfake score seen across all of them.
- * Stops early only when a score ≥ 0.7 is reached (clearly fake) to save time.
+ * Try bytes mode across providers in order, skipping quota-exhausted ones.
+ * Returns the first successful score.
  */
 async function tryBytesMode(
   bytes: Buffer,
@@ -518,9 +511,6 @@ async function tryBytesMode(
     return { error: 'لا توجد مفاتيح API متاحة. أضف SIGHTENGINE_API_USER/SECRET أو HIVE_API_KEY إلى .env.local' };
   }
 
-  let bestScore = -1;
-  let bestProvider = '';
-  let anySucceeded = false;
   let lastError = 'فشل تحليل المحتوى';
 
   for (const p of providers) {
@@ -535,13 +525,7 @@ async function tryBytesMode(
       continue;
     }
 
-    if (r.ok) {
-      anySucceeded = true;
-      if (r.score > bestScore) { bestScore = r.score; bestProvider = p.name; }
-      // If clearly fake, no need to query remaining providers.
-      if (bestScore >= 0.7) break;
-      continue;
-    }
+    if (r.ok) return { score: r.score, provider: p.name };
 
     if (r.quota) {
       console.warn(`${p.name}: quota exhausted, trying next provider`);
@@ -554,8 +538,6 @@ async function tryBytesMode(
     console.warn(`${p.name} scoreBytes error:`, r.error);
     lastError = r.error;
   }
-
-  if (anySucceeded) return { score: bestScore, provider: bestProvider };
 
   const allExhausted = providers.every((p) => quotaExhausted.has(p.name));
   if (allExhausted) {
