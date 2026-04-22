@@ -39,7 +39,7 @@ export default function RootLayout({
 
         <footer className="border-t border-border py-8 text-center text-foreground/50 text-sm bg-surface/30">
           <div className="container mx-auto px-4">
-            تطبيق مدعوم بـ Sightengine API • جميع الحقوق محفوظة {new Date().getFullYear()}
+            جميع الحقوق محفوظة {new Date().getFullYear()}
           </div>
         </footer>
       </body>
