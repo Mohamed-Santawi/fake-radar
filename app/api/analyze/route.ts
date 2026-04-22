@@ -780,3 +780,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'حدث خطأ غير متوقع' }, { status: 500 });
   }
 }
+
+export async function GET() {
+  return NextResponse.json({
+    active: activeProviders().map((p) => p.name),
+    env: {
+      has_rd1: !!process.env.REALITY_DEFENDER_API_KEY,
+      has_rd2: !!process.env.REALITY_DEFENDER_API_KEY_2,
+      has_bm1: !!process.env.BITMIND_API_KEY,
+      has_bm2: !!process.env.BITMIND_API_KEY_2,
+    }
+  });
+}
