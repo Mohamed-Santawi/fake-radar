@@ -425,7 +425,7 @@ async function tryUrlMode(
       continue;
     }
 
-    if (r.ok) return { score: r.score, provider: p.name, errors: {} };
+    if (r.ok) return { score: r.score, provider: p.name };
 
     if (r.quota) {
       console.warn(`${p.name}: quota exhausted, trying next provider`);
