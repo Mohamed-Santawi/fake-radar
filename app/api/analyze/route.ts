@@ -42,6 +42,21 @@ function isVideoUrl(url: string): boolean {
   }
 }
 
+// Normalise known file-sharing share pages to their direct download URL.
+// e.g. pixeldrain.com/u/XXXX  →  pixeldrain.com/api/file/XXXX
+function normaliseFileShareUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'pixeldrain.com') {
+      const m = u.pathname.match(/^\/u\/([A-Za-z0-9]+)/);
+      if (m) return `https://pixeldrain.com/api/file/${m[1]}`;
+    }
+    return url;
+  } catch {
+    return url;
+  }
+}
+
 // ─────────────────────────────── Provider types ───────────────────────────────
 
 /**
@@ -679,6 +694,13 @@ async function handleImageUrl(url: string) {
   const dl = await downloadMedia(url);
   if (!dl.ok) return NextResponse.json({ error: dl.error }, { status: dl.status });
 
+  if (dl.contentType.startsWith('text/') || dl.contentType.includes('html')) {
+    return NextResponse.json(
+      { error: 'الرابط يشير إلى صفحة ويب وليس ملف وسائط. استخدم رابطاً مباشراً ينتهي بـ .jpg أو .mp4 وما شابه.' },
+      { status: 400 },
+    );
+  }
+
   const bytesResult = await tryBytesMode(dl.bytes, dl.contentType, 'image', quotaExhausted);
   if ('score' in bytesResult) {
     return NextResponse.json({ type: { deepfake: bytesResult.score }, provider: bytesResult.provider });
@@ -689,6 +711,13 @@ async function handleImageUrl(url: string) {
 async function handleVideoUrl(url: string) {
   const dl = await downloadMedia(url);
   if (!dl.ok) return NextResponse.json({ error: dl.error }, { status: dl.status });
+
+  if (dl.contentType.startsWith('text/') || dl.contentType.includes('html')) {
+    return NextResponse.json(
+      { error: 'الرابط يشير إلى صفحة ويب وليس ملف وسائط. استخدم رابطاً مباشراً ينتهي بـ .mp4 وما شابه.' },
+      { status: 400 },
+    );
+  }
 
   // Host returned an image despite a video-looking URL — fall through to image scoring.
   if (dl.contentType.startsWith('image/')) {
@@ -747,7 +776,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'يرجى إدخال الرابط أولاً' }, { status: 400 });
     }
 
-    const url = rawUrl.replace(/\s+/g, '');
+    const url = normaliseFileShareUrl(rawUrl.replace(/\s+/g, ''));
     if (!url) {
       return NextResponse.json({ error: 'يرجى إدخال الرابط أولاً' }, { status: 400 });
     }
