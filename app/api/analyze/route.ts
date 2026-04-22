@@ -44,7 +44,7 @@ function isVideoUrl(url: string): boolean {
 
 // Decode a data URI (data:image/jpeg;base64,...) into raw bytes + content-type.
 function parseDataUri(url: string): { bytes: Buffer; contentType: string } | null {
-  const m = url.match(/^data:([^;,]+)(?:;base64)?,(.+)$/s);
+  const m = url.match(/^data:([^;,]+)(?:;base64)?,(.+)$/);
   if (!m) return null;
   try {
     return { contentType: m[1], bytes: Buffer.from(m[2], 'base64') };
