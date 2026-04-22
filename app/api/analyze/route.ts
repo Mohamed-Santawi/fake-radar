@@ -188,103 +188,42 @@ const sightengineAIGen: Provider = {
   },
 };
 
-// ──────────────────────────── Hive Moderation ────────────────────────────────
-// Env vars: HIVE_SECRET_KEY (bearer token), HIVE_ACCESS_KEY_ID (stored, not sent in header)
-// Auth: Authorization: Token {HIVE_SECRET_KEY}
-// The "yes" class score is the probability the image is a deepfake.
-
-const hiveModeration: Provider = {
-  name: 'Hive',
-  isAvailable: () => !!process.env.HIVE_SECRET_KEY,
-
-  async scoreUrl(url) {
-    const res = await fetch('https://api.thehive.ai/api/v2/task/sync', {
-      method: 'POST',
-      headers: {
-        Authorization: `Token ${process.env.HIVE_SECRET_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ url }),
-    });
-    return parseHiveResponse(res);
-  },
-
-  async scoreBytes(bytes, contentType, filename) {
-    const form = new FormData();
-    form.append('image', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
-
-    const res = await fetch('https://api.thehive.ai/api/v2/task/sync', {
-      method: 'POST',
-      headers: { Authorization: `Token ${process.env.HIVE_SECRET_KEY}` },
-      body: form,
-    });
-    return parseHiveResponse(res);
-  },
-};
-
-async function parseHiveResponse(res: Response): Promise<ProviderResult> {
-  let data: unknown;
-  try { data = await res.json(); } catch { data = null; }
-
-  if (!res.ok) {
-    return { ok: false, quota: isQuotaResponse(res.status, data), error: `Hive HTTP ${res.status}` };
-  }
-
-  // Expected shape: { status: [{ response: { output: [{ classes: [{ class, score }] }] } }] }
-  // The "yes" class = deepfake probability; "no" class = real.
-  // If the shape below doesn't match your Hive API response, adjust the path to the score.
-  try {
-    const classes: { class: string; score: number }[] =
-      (data as { status: { response: { output: { classes: { class: string; score: number }[] }[] } }[] })
-        .status[0].response.output[0].classes;
-
-    const yes = classes.find((c) => c.class === 'yes');
-    if (yes !== undefined) return { ok: true, score: yes.score };
-
-    // Fallback: look for a class named 'deepfake'
-    const deepfake = classes.find((c) => c.class === 'deepfake');
-    if (deepfake !== undefined) return { ok: true, score: deepfake.score };
-
-    return { ok: false, quota: false, error: 'Hive: unexpected class names in response' };
-  } catch {
-    return { ok: false, quota: false, error: 'Hive: could not parse response' };
-  }
-}
-
 // ──────────────────────────────── BitMind ────────────────────────────────────
-// Env var: BITMIND_API_KEY  (format: bitmind-{uuid}:{secret})
+// Env var: BITMIND_API_KEY and BITMIND_API_KEY_2
 // Endpoint: POST https://api.bitmind.ai/detect-image
-// Auth: Authorization: Bearer {BITMIND_API_KEY}
 // Score field: response.confidence (0-1, AI-generation likelihood)
 
-const bitmind: Provider = {
-  name: 'BitMind',
-  isAvailable: () => !!process.env.BITMIND_API_KEY,
+function createBitmindProvider(name: string, envVar: string): Provider {
+  return {
+    name,
+    isAvailable: () => !!process.env[envVar],
+    async scoreUrl(url) {
+      const res = await fetch('https://api.bitmind.ai/detect-image', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env[envVar]}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ image: url }),
+      });
+      return parseBitmindResponse(res);
+    },
+    async scoreBytes(bytes, contentType, filename) {
+      const form = new FormData();
+      form.append('image', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
 
-  async scoreUrl(url) {
-    const res = await fetch('https://api.bitmind.ai/detect-image', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.BITMIND_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ image: url }),
-    });
-    return parseBitmindResponse(res);
-  },
+      const res = await fetch('https://api.bitmind.ai/detect-image', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${process.env[envVar]}` },
+        body: form,
+      });
+      return parseBitmindResponse(res);
+    },
+  };
+}
 
-  async scoreBytes(bytes, contentType, filename) {
-    const form = new FormData();
-    form.append('image', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
-
-    const res = await fetch('https://api.bitmind.ai/detect-image', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${process.env.BITMIND_API_KEY}` },
-      body: form,
-    });
-    return parseBitmindResponse(res);
-  },
-};
+const bitmind1 = createBitmindProvider('BitMind 1', 'BITMIND_API_KEY');
+const bitmind2 = createBitmindProvider('BitMind 2', 'BITMIND_API_KEY_2');
 
 async function parseBitmindResponse(res: Response): Promise<ProviderResult> {
   let data: unknown;
@@ -367,87 +306,93 @@ const POLL_INTERVAL_MS = 5000;
 const RD_BASE = 'https://api.prd.realitydefender.xyz';
 const RD_TERMINAL = new Set(['AUTHENTIC', 'FAKE', 'SUSPICIOUS', 'NOT_APPLICABLE', 'UNABLE_TO_EVALUATE']);
 
-const realityDefender: Provider = {
-  name: 'RealityDefender',
-  isAvailable: () => !!process.env.REALITY_DEFENDER_API_KEY,
-  // No scoreUrl — RD requires file upload; outer code downloads bytes first.
+function createRealityDefenderProvider(name: string, envVar: string): Provider {
+  return {
+    name,
+    isAvailable: () => !!process.env[envVar],
+    // No scoreUrl — RD requires file upload; outer code downloads bytes first.
 
-  async scoreBytes(bytes, contentType, filename) {
-    const apiKey = process.env.REALITY_DEFENDER_API_KEY!;
-    const authHeader = { 'X-API-KEY': apiKey };
+    async scoreBytes(bytes, contentType, filename) {
+      const apiKey = process.env[envVar]!;
+      const authHeader = { 'X-API-KEY': apiKey };
 
-    // Step 1: request a presigned S3 upload URL
-    const presignRes = await fetch(`${RD_BASE}/api/files/aws-presigned`, {
-      method: 'POST',
-      headers: { ...authHeader, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fileName: filename }),
-    });
-    let presignData: unknown;
-    try { presignData = await presignRes.json(); } catch { presignData = null; }
+      // Step 1: request a presigned S3 upload URL
+      const presignRes = await fetch(`${RD_BASE}/api/files/aws-presigned`, {
+        method: 'POST',
+        headers: { ...authHeader, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName: filename }),
+      });
+      let presignData: unknown;
+      try { presignData = await presignRes.json(); } catch { presignData = null; }
 
-    if (!presignRes.ok) {
-      return { ok: false, quota: isQuotaResponse(presignRes.status, presignData), error: `RealityDefender presign HTTP ${presignRes.status}` };
-    }
-
-    type PresignResp = { response?: { signedUrl?: string; requestId?: string }; requestId?: string };
-    const pd = presignData as PresignResp;
-    const signedUrl = pd?.response?.signedUrl;
-    const requestId = pd?.response?.requestId ?? pd?.requestId;
-
-    if (!signedUrl) return { ok: false, quota: false, error: 'RealityDefender: no signedUrl in presign response' };
-    if (!requestId) return { ok: false, quota: false, error: 'RealityDefender: no requestId in presign response' };
-
-    // Step 2: upload raw bytes directly to S3 (no auth header — it's a presigned URL)
-    const uploadRes = await fetch(signedUrl, {
-      method: 'PUT',
-      headers: { 'Content-Type': contentType },
-      body: new Blob([new Uint8Array(bytes)], { type: contentType }),
-    });
-    if (!uploadRes.ok) {
-      return { ok: false, quota: false, error: `RealityDefender S3 upload HTTP ${uploadRes.status}` };
-    }
-
-    // Step 3: poll until a terminal status arrives (max POLL_ATTEMPTS × POLL_INTERVAL_MS)
-    for (let i = 0; i < POLL_ATTEMPTS; i++) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-
-      const pollRes = await fetch(`${RD_BASE}/api/media/users/${requestId}`, { headers: authHeader });
-      let pollData: unknown;
-      try { pollData = await pollRes.json(); } catch { pollData = null; }
-
-      if (!pollRes.ok) {
-        return { ok: false, quota: isQuotaResponse(pollRes.status, pollData), error: `RealityDefender poll HTTP ${pollRes.status}` };
+      if (!presignRes.ok) {
+        return { ok: false, quota: isQuotaResponse(presignRes.status, presignData), error: `RealityDefender presign HTTP ${presignRes.status}` };
       }
 
-      type PollResp = { resultsSummary?: { status?: string; metadata?: { finalScore?: number } } };
-      const { resultsSummary } = (pollData as PollResp) ?? {};
-      const status = resultsSummary?.status;
+      type PresignResp = { response?: { signedUrl?: string; requestId?: string }; requestId?: string };
+      const pd = presignData as PresignResp;
+      const signedUrl = pd?.response?.signedUrl;
+      const requestId = pd?.response?.requestId ?? pd?.requestId;
 
-      if (!status || !RD_TERMINAL.has(status)) continue; // still processing
+      if (!signedUrl) return { ok: false, quota: false, error: 'RealityDefender: no signedUrl in presign response' };
+      if (!requestId) return { ok: false, quota: false, error: 'RealityDefender: no requestId in presign response' };
 
-      if (status === 'NOT_APPLICABLE' || status === 'UNABLE_TO_EVALUATE') {
-        return { ok: false, quota: false, error: `RealityDefender: ${status}` };
+      // Step 2: upload raw bytes directly to S3 (no auth header — it's a presigned URL)
+      const uploadRes = await fetch(signedUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': contentType },
+        body: new Blob([new Uint8Array(bytes)], { type: contentType }),
+      });
+      if (!uploadRes.ok) {
+        return { ok: false, quota: false, error: `RealityDefender S3 upload HTTP ${uploadRes.status}` };
       }
 
-      // finalScore 0-100 → normalize to 0-1
-      const raw = resultsSummary?.metadata?.finalScore;
-      const score = typeof raw === 'number' ? raw / 100 : status === 'FAKE' ? 1 : 0;
-      return { ok: true, score };
-    }
+      // Step 3: poll until a terminal status arrives (max POLL_ATTEMPTS × POLL_INTERVAL_MS)
+      for (let i = 0; i < POLL_ATTEMPTS; i++) {
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
 
-    return { ok: false, quota: false, error: 'RealityDefender: timed out waiting for result' };
-  },
-};
+        const pollRes = await fetch(`${RD_BASE}/api/media/users/${requestId}`, { headers: authHeader });
+        let pollData: unknown;
+        try { pollData = await pollRes.json(); } catch { pollData = null; }
+
+        if (!pollRes.ok) {
+          return { ok: false, quota: isQuotaResponse(pollRes.status, pollData), error: `RealityDefender poll HTTP ${pollRes.status}` };
+        }
+
+        type PollResp = { resultsSummary?: { status?: string; metadata?: { finalScore?: number } } };
+        const { resultsSummary } = (pollData as PollResp) ?? {};
+        const status = resultsSummary?.status;
+
+        if (!status || !RD_TERMINAL.has(status)) continue; // still processing
+
+        if (status === 'NOT_APPLICABLE' || status === 'UNABLE_TO_EVALUATE') {
+          return { ok: false, quota: false, error: `RealityDefender: ${status}` };
+        }
+
+        // finalScore 0-100 → normalize to 0-1
+        const raw = resultsSummary?.metadata?.finalScore;
+        const score = typeof raw === 'number' ? raw / 100 : status === 'FAKE' ? 1 : 0;
+        return { ok: true, score };
+      }
+
+      return { ok: false, quota: false, error: 'RealityDefender: timed out waiting for result' };
+    },
+  };
+}
+
+const realityDefender1 = createRealityDefenderProvider('RealityDefender 1', 'REALITY_DEFENDER_API_KEY');
+const realityDefender2 = createRealityDefenderProvider('RealityDefender 2', 'REALITY_DEFENDER_API_KEY_2');
 
 // ─────────────────────────── Provider chain ──────────────────────────────────
 // Order: BitMind → Hive → TruthScan → RealityDefender → Sightengine/deepfake → Sightengine/ai-gen
 // Only providers with env vars set are activated.
 
 const ALL_PROVIDERS: Provider[] = [
-  bitmind,
-  hiveModeration,
+  realityDefender1,
+  realityDefender2,
+  bitmind1,
+  bitmind2,
   truthscan,
-  realityDefender,
   sightengineDeepfake,
   sightengineAIGen,
 ];
@@ -467,7 +412,11 @@ async function tryUrlMode(
   quotaExhausted: Set<string>,
 ): Promise<{ score: number; provider: string } | null> {
   for (const p of activeProviders()) {
-    if (!p.scoreUrl) continue;
+    if (!p.scoreUrl) {
+      // To strictly preserve provider priority order, if the current provider 
+      // doesn't support URL mode, we must abort URL mode and fall back to Bytes mode.
+      return null;
+    }
     let r: ProviderResult;
     try {
       r = await p.scoreUrl(url);
