@@ -42,6 +42,17 @@ function isVideoUrl(url: string): boolean {
   }
 }
 
+// Decode a data URI (data:image/jpeg;base64,...) into raw bytes + content-type.
+function parseDataUri(url: string): { bytes: Buffer; contentType: string } | null {
+  const m = url.match(/^data:([^;,]+)(?:;base64)?,(.+)$/s);
+  if (!m) return null;
+  try {
+    return { contentType: m[1], bytes: Buffer.from(m[2], 'base64') };
+  } catch {
+    return null;
+  }
+}
+
 // Normalise known file-sharing share pages to their direct download URL.
 // e.g. pixeldrain.com/u/XXXX  →  pixeldrain.com/api/file/XXXX
 function normaliseFileShareUrl(url: string): string {
@@ -786,6 +797,17 @@ export async function POST(request: Request) {
         { error: 'لا توجد مفاتيح API متاحة. أضف SIGHTENGINE_API_USER/SECRET أو HIVE_API_KEY إلى .env.local' },
         { status: 500 },
       );
+    }
+
+    // Handle data URIs (data:image/jpeg;base64,...) — decode locally, skip download.
+    const dataUri = parseDataUri(url);
+    if (dataUri) {
+      const quotaExhausted = new Set<string>();
+      const result = await tryBytesMode(dataUri.bytes, dataUri.contentType, 'image', quotaExhausted);
+      if ('score' in result) {
+        return NextResponse.json({ type: { deepfake: result.score }, provider: result.provider });
+      }
+      return NextResponse.json({ error: result.error }, { status: 500 });
     }
 
     if (isSocialMediaUrl(url)) {
