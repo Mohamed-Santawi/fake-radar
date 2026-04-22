@@ -13,7 +13,25 @@ const MAX_PROXY_BYTES = 30 * 1024 * 1024;
 const FRAME_COUNT = 5;
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-const SIGHTENGINE_IMAGE = 'https://api.sightengine.com/1.0/check.json';
+
+const SOCIAL_MEDIA_HOSTS = [
+  'twitter.com', 'x.com',
+  'instagram.com', 'facebook.com', 'fb.com', 'fb.watch',
+  'youtube.com', 'youtu.be',
+  'tiktok.com',
+  'reddit.com', 'redd.it',
+  'linkedin.com',
+];
+
+function isSocialMediaUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    const host = hostname.replace(/^www\./, '');
+    return SOCIAL_MEDIA_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
 
 function isVideoUrl(url: string): boolean {
   try {
@@ -24,18 +42,480 @@ function isVideoUrl(url: string): boolean {
   }
 }
 
-type SightengineError = { type?: string; message?: string };
-type SightengineResponse = {
-  status?: string;
-  error?: SightengineError;
-  type?: { deepfake?: number };
+// ─────────────────────────────── Provider types ───────────────────────────────
+
+/**
+ * ok=true  → deepfake probability 0-1
+ * ok=false, quota=true  → trial/quota exhausted, skip to next provider
+ * ok=false, quota=false → hard error (malformed response, unreachable URL, etc.)
+ *   Special value error='url_fetch_failure': Sightengine-style "can't crawl the URL"
+ *   signal — callers should download bytes and retry in bytes mode.
+ */
+type ProviderResult =
+  | { ok: true; score: number }
+  | { ok: false; quota: boolean; error: string };
+
+interface Provider {
+  name: string;
+  isAvailable(): boolean;
+  /** Analyse by having the provider fetch the URL itself. Optional — not all providers support this. */
+  scoreUrl?(url: string): Promise<ProviderResult>;
+  /** Analyse from raw bytes (required by all providers). */
+  scoreBytes(bytes: Buffer, contentType: string, filename: string): Promise<ProviderResult>;
+}
+
+function isQuotaResponse(httpStatus: number, body: unknown): boolean {
+  if (httpStatus === 402 || httpStatus === 429) return true;
+  const text = JSON.stringify(body ?? '').toLowerCase();
+  return /limit|quota|trial|exceeded|credit|balance|plan|subscription|upgrade/.test(text);
+}
+
+// ─────────────────────────── Sightengine / deepfake ──────────────────────────
+
+const sightengineDeepfake: Provider = {
+  name: 'Sightengine/deepfake',
+  isAvailable: () =>
+    !!(process.env.SIGHTENGINE_API_USER && process.env.SIGHTENGINE_API_SECRET),
+
+  async scoreUrl(url) {
+    const form = new FormData();
+    form.append('url', url);
+    form.append('models', 'deepfake');
+    form.append('api_user', process.env.SIGHTENGINE_API_USER!);
+    form.append('api_secret', process.env.SIGHTENGINE_API_SECRET!);
+
+    const res = await fetch('https://api.sightengine.com/1.0/check.json', { method: 'POST', body: form });
+    const data = await res.json();
+
+    if (data?.status === 'failure') {
+      const errText = `${data?.error?.type ?? ''} ${data?.error?.message ?? ''}`;
+      if (/url|download|fetch|media|unreachable|host/i.test(errText)) {
+        return { ok: false, quota: false, error: 'url_fetch_failure' };
+      }
+      return { ok: false, quota: isQuotaResponse(res.status, data), error: data?.error?.message || 'Sightengine failure' };
+    }
+    if (!res.ok) return { ok: false, quota: isQuotaResponse(res.status, data), error: 'Sightengine HTTP error' };
+    return { ok: true, score: Number(data?.type?.deepfake ?? 0) };
+  },
+
+  async scoreBytes(bytes, contentType, filename) {
+    const form = new FormData();
+    form.append('models', 'deepfake');
+    form.append('api_user', process.env.SIGHTENGINE_API_USER!);
+    form.append('api_secret', process.env.SIGHTENGINE_API_SECRET!);
+    form.append('media', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+
+    const res = await fetch('https://api.sightengine.com/1.0/check.json', { method: 'POST', body: form });
+    const data = await res.json();
+
+    if (!res.ok || data?.status === 'failure') {
+      return { ok: false, quota: isQuotaResponse(res.status, data), error: data?.error?.message || 'Sightengine failure' };
+    }
+    return { ok: true, score: Number(data?.type?.deepfake ?? 0) };
+  },
 };
 
-function looksLikeUrlFetchFailure(data: SightengineResponse): boolean {
-  if (data?.status !== 'failure') return false;
-  const msg = `${data?.error?.type ?? ''} ${data?.error?.message ?? ''}`.toLowerCase();
-  return /url|download|fetch|media|unreachable|host/.test(msg);
+// ─────────────────────────── Sightengine / AI-generated ──────────────────────
+// Uses the `genai` model — separate quota from the deepfake model.
+// Response field is type.ai_generated (0-1, same deepfake-probability semantics here).
+
+const sightengineAIGen: Provider = {
+  name: 'Sightengine/ai-generated',
+  isAvailable: () =>
+    !!(process.env.SIGHTENGINE_API_USER && process.env.SIGHTENGINE_API_SECRET),
+
+  async scoreUrl(url) {
+    const form = new FormData();
+    form.append('url', url);
+    form.append('models', 'genai');
+    form.append('api_user', process.env.SIGHTENGINE_API_USER!);
+    form.append('api_secret', process.env.SIGHTENGINE_API_SECRET!);
+
+    const res = await fetch('https://api.sightengine.com/1.0/check.json', { method: 'POST', body: form });
+    const data = await res.json();
+
+    if (data?.status === 'failure') {
+      const errText = `${data?.error?.type ?? ''} ${data?.error?.message ?? ''}`;
+      if (/url|download|fetch|media|unreachable|host/i.test(errText)) {
+        return { ok: false, quota: false, error: 'url_fetch_failure' };
+      }
+      return { ok: false, quota: isQuotaResponse(res.status, data), error: data?.error?.message || 'Sightengine failure' };
+    }
+    if (!res.ok) return { ok: false, quota: isQuotaResponse(res.status, data), error: 'Sightengine HTTP error' };
+    return { ok: true, score: Number(data?.type?.ai_generated ?? 0) };
+  },
+
+  async scoreBytes(bytes, contentType, filename) {
+    const form = new FormData();
+    form.append('models', 'genai');
+    form.append('api_user', process.env.SIGHTENGINE_API_USER!);
+    form.append('api_secret', process.env.SIGHTENGINE_API_SECRET!);
+    form.append('media', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+
+    const res = await fetch('https://api.sightengine.com/1.0/check.json', { method: 'POST', body: form });
+    const data = await res.json();
+
+    if (!res.ok || data?.status === 'failure') {
+      return { ok: false, quota: isQuotaResponse(res.status, data), error: data?.error?.message || 'Sightengine failure' };
+    }
+    return { ok: true, score: Number(data?.type?.ai_generated ?? 0) };
+  },
+};
+
+// ──────────────────────────── Hive Moderation ────────────────────────────────
+// Env vars: HIVE_SECRET_KEY (bearer token), HIVE_ACCESS_KEY_ID (stored, not sent in header)
+// Auth: Authorization: Token {HIVE_SECRET_KEY}
+// The "yes" class score is the probability the image is a deepfake.
+
+const hiveModeration: Provider = {
+  name: 'Hive',
+  isAvailable: () => !!process.env.HIVE_SECRET_KEY,
+
+  async scoreUrl(url) {
+    const res = await fetch('https://api.thehive.ai/api/v2/task/sync', {
+      method: 'POST',
+      headers: {
+        Authorization: `Token ${process.env.HIVE_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url }),
+    });
+    return parseHiveResponse(res);
+  },
+
+  async scoreBytes(bytes, contentType, filename) {
+    const form = new FormData();
+    form.append('image', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+
+    const res = await fetch('https://api.thehive.ai/api/v2/task/sync', {
+      method: 'POST',
+      headers: { Authorization: `Token ${process.env.HIVE_SECRET_KEY}` },
+      body: form,
+    });
+    return parseHiveResponse(res);
+  },
+};
+
+async function parseHiveResponse(res: Response): Promise<ProviderResult> {
+  let data: unknown;
+  try { data = await res.json(); } catch { data = null; }
+
+  if (!res.ok) {
+    return { ok: false, quota: isQuotaResponse(res.status, data), error: `Hive HTTP ${res.status}` };
+  }
+
+  // Expected shape: { status: [{ response: { output: [{ classes: [{ class, score }] }] } }] }
+  // The "yes" class = deepfake probability; "no" class = real.
+  // If the shape below doesn't match your Hive API response, adjust the path to the score.
+  try {
+    const classes: { class: string; score: number }[] =
+      (data as { status: { response: { output: { classes: { class: string; score: number }[] }[] } }[] })
+        .status[0].response.output[0].classes;
+
+    const yes = classes.find((c) => c.class === 'yes');
+    if (yes !== undefined) return { ok: true, score: yes.score };
+
+    // Fallback: look for a class named 'deepfake'
+    const deepfake = classes.find((c) => c.class === 'deepfake');
+    if (deepfake !== undefined) return { ok: true, score: deepfake.score };
+
+    return { ok: false, quota: false, error: 'Hive: unexpected class names in response' };
+  } catch {
+    return { ok: false, quota: false, error: 'Hive: could not parse response' };
+  }
 }
+
+// ──────────────────────────────── BitMind ────────────────────────────────────
+// Env var: BITMIND_API_KEY  (format: bitmind-{uuid}:{secret})
+// Endpoint: POST https://api.bitmind.ai/detect-image
+// Auth: Authorization: Bearer {BITMIND_API_KEY}
+// Score field: response.confidence (0-1, AI-generation likelihood)
+
+const bitmind: Provider = {
+  name: 'BitMind',
+  isAvailable: () => !!process.env.BITMIND_API_KEY,
+
+  async scoreUrl(url) {
+    const res = await fetch('https://api.bitmind.ai/detect-image', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.BITMIND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ image: url }),
+    });
+    return parseBitmindResponse(res);
+  },
+
+  async scoreBytes(bytes, contentType, filename) {
+    const form = new FormData();
+    form.append('image', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+
+    const res = await fetch('https://api.bitmind.ai/detect-image', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.BITMIND_API_KEY}` },
+      body: form,
+    });
+    return parseBitmindResponse(res);
+  },
+};
+
+async function parseBitmindResponse(res: Response): Promise<ProviderResult> {
+  let data: unknown;
+  try { data = await res.json(); } catch { data = null; }
+
+  if (!res.ok) {
+    return { ok: false, quota: isQuotaResponse(res.status, data), error: `BitMind HTTP ${res.status}` };
+  }
+
+  // { isAI: boolean, confidence: number (0-1), similarity: number, objectKey: string }
+  const confidence = (data as Record<string, unknown>)?.confidence as number | undefined;
+  if (typeof confidence === 'number') return { ok: true, score: confidence };
+  return { ok: false, quota: false, error: 'BitMind: unexpected response shape' };
+}
+
+// ──────────────────────────────── TruthScan ──────────────────────────────────
+// Env var: TRUTHSCAN_API_KEY
+// TODO: fill in endpoint + response shape from https://truthscan.com (or their API docs).
+
+const truthscan: Provider = {
+  name: 'TruthScan',
+  isAvailable: () => !!process.env.TRUTHSCAN_API_KEY,
+
+  async scoreUrl(url) {
+    // TODO: replace with TruthScan's correct endpoint and request format.
+    const res = await fetch('https://api.truthscan.com/v1/detect', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.TRUTHSCAN_API_KEY!,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url }),
+    });
+    return parseTruthscanResponse(res);
+  },
+
+  async scoreBytes(bytes, contentType, filename) {
+    // TODO: replace with TruthScan's correct bytes upload format.
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+
+    const res = await fetch('https://api.truthscan.com/v1/detect', {
+      method: 'POST',
+      headers: { 'x-api-key': process.env.TRUTHSCAN_API_KEY! },
+      body: form,
+    });
+    return parseTruthscanResponse(res);
+  },
+};
+
+async function parseTruthscanResponse(res: Response): Promise<ProviderResult> {
+  let data: unknown;
+  try { data = await res.json(); } catch { data = null; }
+
+  if (!res.ok) {
+    return { ok: false, quota: isQuotaResponse(res.status, data), error: `TruthScan HTTP ${res.status}` };
+  }
+
+  // TODO: adjust to TruthScan's actual response shape.
+  const score = (data as Record<string, unknown>)?.score as number | undefined;
+  if (typeof score === 'number') return { ok: true, score };
+  return { ok: false, quota: false, error: 'TruthScan: unexpected response shape' };
+}
+
+// ─────────────────────────── Reality Defender ────────────────────────────────
+// Env var: REALITY_DEFENDER_API_KEY
+// Auth header: X-API-KEY (not Bearer)
+// Flow: presign → PUT raw bytes to S3 → poll until terminal status
+// Score: resultsSummary.metadata.finalScore (0-100) → divided by 100
+// Terminal statuses: AUTHENTIC | FAKE | SUSPICIOUS | NOT_APPLICABLE | UNABLE_TO_EVALUATE
+
+const POLL_ATTEMPTS = 6;
+const POLL_INTERVAL_MS = 5000;
+
+const RD_BASE = 'https://api.prd.realitydefender.xyz';
+const RD_TERMINAL = new Set(['AUTHENTIC', 'FAKE', 'SUSPICIOUS', 'NOT_APPLICABLE', 'UNABLE_TO_EVALUATE']);
+
+const realityDefender: Provider = {
+  name: 'RealityDefender',
+  isAvailable: () => !!process.env.REALITY_DEFENDER_API_KEY,
+  // No scoreUrl — RD requires file upload; outer code downloads bytes first.
+
+  async scoreBytes(bytes, contentType, filename) {
+    const apiKey = process.env.REALITY_DEFENDER_API_KEY!;
+    const authHeader = { 'X-API-KEY': apiKey };
+
+    // Step 1: request a presigned S3 upload URL
+    const presignRes = await fetch(`${RD_BASE}/api/files/aws-presigned`, {
+      method: 'POST',
+      headers: { ...authHeader, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: filename }),
+    });
+    let presignData: unknown;
+    try { presignData = await presignRes.json(); } catch { presignData = null; }
+
+    if (!presignRes.ok) {
+      return { ok: false, quota: isQuotaResponse(presignRes.status, presignData), error: `RealityDefender presign HTTP ${presignRes.status}` };
+    }
+
+    type PresignResp = { response?: { signedUrl?: string; requestId?: string }; requestId?: string };
+    const pd = presignData as PresignResp;
+    const signedUrl = pd?.response?.signedUrl;
+    const requestId = pd?.response?.requestId ?? pd?.requestId;
+
+    if (!signedUrl) return { ok: false, quota: false, error: 'RealityDefender: no signedUrl in presign response' };
+    if (!requestId) return { ok: false, quota: false, error: 'RealityDefender: no requestId in presign response' };
+
+    // Step 2: upload raw bytes directly to S3 (no auth header — it's a presigned URL)
+    const uploadRes = await fetch(signedUrl, {
+      method: 'PUT',
+      headers: { 'Content-Type': contentType },
+      body: new Blob([new Uint8Array(bytes)], { type: contentType }),
+    });
+    if (!uploadRes.ok) {
+      return { ok: false, quota: false, error: `RealityDefender S3 upload HTTP ${uploadRes.status}` };
+    }
+
+    // Step 3: poll until a terminal status arrives (max POLL_ATTEMPTS × POLL_INTERVAL_MS)
+    for (let i = 0; i < POLL_ATTEMPTS; i++) {
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+      const pollRes = await fetch(`${RD_BASE}/api/media/users/${requestId}`, { headers: authHeader });
+      let pollData: unknown;
+      try { pollData = await pollRes.json(); } catch { pollData = null; }
+
+      if (!pollRes.ok) {
+        return { ok: false, quota: isQuotaResponse(pollRes.status, pollData), error: `RealityDefender poll HTTP ${pollRes.status}` };
+      }
+
+      type PollResp = { resultsSummary?: { status?: string; metadata?: { finalScore?: number } } };
+      const { resultsSummary } = (pollData as PollResp) ?? {};
+      const status = resultsSummary?.status;
+
+      if (!status || !RD_TERMINAL.has(status)) continue; // still processing
+
+      if (status === 'NOT_APPLICABLE' || status === 'UNABLE_TO_EVALUATE') {
+        return { ok: false, quota: false, error: `RealityDefender: ${status}` };
+      }
+
+      // finalScore 0-100 → normalize to 0-1
+      const raw = resultsSummary?.metadata?.finalScore;
+      const score = typeof raw === 'number' ? raw / 100 : status === 'FAKE' ? 1 : 0;
+      return { ok: true, score };
+    }
+
+    return { ok: false, quota: false, error: 'RealityDefender: timed out waiting for result' };
+  },
+};
+
+// ─────────────────────────── Provider chain ──────────────────────────────────
+// Order: BitMind → Hive → TruthScan → RealityDefender → Sightengine/deepfake → Sightengine/ai-gen
+// Only providers with env vars set are activated.
+
+const ALL_PROVIDERS: Provider[] = [
+  bitmind,
+  hiveModeration,
+  truthscan,
+  realityDefender,
+  sightengineDeepfake,
+  sightengineAIGen,
+];
+
+function activeProviders() {
+  return ALL_PROVIDERS.filter((p) => p.isAvailable());
+}
+
+/**
+ * Try URL mode across all providers.
+ * Returns the first successful score, or null if URL mode should be abandoned
+ * (either all quota-exhausted or a URL-unreachable signal was received).
+ * `quotaExhausted` is mutated so bytes-mode can skip those providers.
+ */
+async function tryUrlMode(
+  url: string,
+  quotaExhausted: Set<string>,
+): Promise<{ score: number; provider: string } | null> {
+  for (const p of activeProviders()) {
+    if (!p.scoreUrl) continue;
+    let r: ProviderResult;
+    try {
+      r = await p.scoreUrl(url);
+    } catch (e) {
+      console.warn(`${p.name} scoreUrl threw:`, e);
+      continue;
+    }
+
+    if (r.ok) return { score: r.score, provider: p.name };
+
+    if (r.quota) {
+      console.warn(`${p.name}: quota exhausted, trying next provider`);
+      quotaExhausted.add(p.name);
+      continue;
+    }
+
+    if (r.error === 'url_fetch_failure') {
+      // The URL itself is unreachable — abandon URL mode, download bytes instead.
+      return null;
+    }
+
+    // Hard provider error (bad response shape etc) — log and continue.
+    console.warn(`${p.name} scoreUrl error:`, r.error);
+  }
+  return null;
+}
+
+/**
+ * Try bytes mode across all providers, skipping those already quota-exhausted.
+ */
+async function tryBytesMode(
+  bytes: Buffer,
+  contentType: string,
+  filename: string,
+  quotaExhausted: Set<string>,
+): Promise<{ score: number; provider: string } | { error: string }> {
+  const providers = activeProviders();
+
+  if (providers.length === 0) {
+    return { error: 'لا توجد مفاتيح API متاحة. أضف SIGHTENGINE_API_USER/SECRET أو HIVE_API_KEY إلى .env.local' };
+  }
+
+  let lastError = 'فشل تحليل المحتوى';
+
+  for (const p of providers) {
+    if (quotaExhausted.has(p.name)) continue;
+
+    let r: ProviderResult;
+    try {
+      r = await p.scoreBytes(bytes, contentType, filename);
+    } catch (e) {
+      console.warn(`${p.name} scoreBytes threw:`, e);
+      lastError = `${p.name}: خطأ غير متوقع`;
+      continue;
+    }
+
+    if (r.ok) return { score: r.score, provider: p.name };
+
+    if (r.quota) {
+      console.warn(`${p.name}: quota exhausted, trying next provider`);
+      quotaExhausted.add(p.name);
+      lastError = `انتهت الحصة المجانية لـ ${p.name}`;
+      continue;
+    }
+
+    // Hard error — log and continue to next provider.
+    console.warn(`${p.name} scoreBytes error:`, r.error);
+    lastError = r.error;
+  }
+
+  const allExhausted = providers.every((p) => quotaExhausted.has(p.name));
+  if (allExhausted) {
+    return { error: 'انتهت الحصة المجانية لجميع مزودي الخدمة. جدد اشتراكك أو أضف مفتاح API جديد.' };
+  }
+
+  return { error: lastError };
+}
+
+// ────────────────────────── Media download helper ────────────────────────────
 
 type DownloadResult =
   | { ok: true; bytes: Buffer; contentType: string }
@@ -57,28 +537,17 @@ async function downloadMedia(url: string): Promise<DownloadResult> {
   }
   const declared = Number(res.headers.get('content-length') || 0);
   if (declared && declared > MAX_PROXY_BYTES) {
-    return {
-      ok: false,
-      status: 413,
-      error: 'حجم الملف أكبر من الحد المسموح (30 ميجابايت). جرب رابطاً أصغر.',
-    };
+    return { ok: false, status: 413, error: 'حجم الملف أكبر من الحد المسموح (30 ميجابايت). جرب رابطاً أصغر.' };
   }
   const bytes = Buffer.from(await res.arrayBuffer());
   if (bytes.byteLength > MAX_PROXY_BYTES) {
-    return {
-      ok: false,
-      status: 413,
-      error: 'حجم الملف أكبر من الحد المسموح (30 ميجابايت).',
-    };
+    return { ok: false, status: 413, error: 'حجم الملف أكبر من الحد المسموح (30 ميجابايت).' };
   }
-  return {
-    ok: true,
-    bytes,
-    contentType: res.headers.get('content-type') || 'application/octet-stream',
-  };
+  return { ok: true, bytes, contentType: res.headers.get('content-type') || 'application/octet-stream' };
 }
 
-// Sample up to `count` JPEG frames from a video buffer, ~1 frame every 2s.
+// ─────────────────────────── Frame extraction ────────────────────────────────
+
 async function extractFrames(videoBytes: Buffer, count: number): Promise<Buffer[]> {
   if (!ffmpegPath) throw new Error('ffmpeg binary not available for this platform');
 
@@ -88,15 +557,13 @@ async function extractFrames(videoBytes: Buffer, count: number): Promise<Buffer[
 
   try {
     await writeFile(inputPath, videoBytes);
-    // Vercel's traced binary may lose its +x bit; ensure it's executable on Linux.
     if (process.platform !== 'win32') {
       await chmod(ffmpegPath, 0o755).catch(() => {});
     }
 
     await new Promise<void>((resolve, reject) => {
       const proc = spawn(ffmpegPath as string, [
-        '-hide_banner',
-        '-loglevel', 'error',
+        '-hide_banner', '-loglevel', 'error',
         '-i', inputPath,
         '-vf', 'fps=1/2',
         '-frames:v', String(count),
@@ -121,67 +588,38 @@ async function extractFrames(videoBytes: Buffer, count: number): Promise<Buffer[
   }
 }
 
-type ScoreResult = { ok: true; score: number } | { ok: false; error: string };
+// ───────────────────────── Route handlers ────────────────────────────────────
 
-async function scoreImageBytes(
-  apiUser: string,
-  apiSecret: string,
-  bytes: Buffer,
-  contentType: string,
-  filename: string,
-): Promise<ScoreResult> {
-  const form = new FormData();
-  form.append('models', 'deepfake');
-  form.append('api_user', apiUser);
-  form.append('api_secret', apiSecret);
-  form.append('media', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+async function handleImageUrl(url: string) {
+  const quotaExhausted = new Set<string>();
 
-  const res = await fetch(SIGHTENGINE_IMAGE, { method: 'POST', body: form });
-  const data = await res.json();
-  if (!res.ok || data?.status === 'failure') {
-    return { ok: false, error: data?.error?.message || 'فشل في تحليل اللقطة' };
-  }
-  return { ok: true, score: Number(data?.type?.deepfake) || 0 };
-}
-
-async function handleImageUrl(url: string, apiUser: string, apiSecret: string) {
-  const urlForm = new FormData();
-  urlForm.append('url', url);
-  urlForm.append('models', 'deepfake');
-  urlForm.append('api_user', apiUser);
-  urlForm.append('api_secret', apiSecret);
-
-  const seRes = await fetch(SIGHTENGINE_IMAGE, { method: 'POST', body: urlForm });
-  const seData: SightengineResponse = await seRes.json();
-
-  if (seRes.ok && seData?.status !== 'failure') {
-    return NextResponse.json(seData);
-  }
-  if (!looksLikeUrlFetchFailure(seData)) {
-    console.error('Sightengine error (image url path):', seData);
-    return NextResponse.json(
-      { error: seData?.error?.message || 'فشل في تحليل المحتوى' },
-      { status: 500 },
-    );
+  // Phase 1: let providers fetch the URL themselves (faster, no egress).
+  const urlResult = await tryUrlMode(url, quotaExhausted);
+  if (urlResult) {
+    return NextResponse.json({ type: { deepfake: urlResult.score } });
   }
 
+  // Phase 2: download bytes ourselves, upload to providers.
   const dl = await downloadMedia(url);
   if (!dl.ok) return NextResponse.json({ error: dl.error }, { status: dl.status });
 
-  const r = await scoreImageBytes(apiUser, apiSecret, dl.bytes, dl.contentType, 'image');
-  if (!r.ok) return NextResponse.json({ error: r.error }, { status: 500 });
-  return NextResponse.json({ type: { deepfake: r.score } });
+  const bytesResult = await tryBytesMode(dl.bytes, dl.contentType, 'image', quotaExhausted);
+  if ('score' in bytesResult) {
+    return NextResponse.json({ type: { deepfake: bytesResult.score } });
+  }
+  return NextResponse.json({ error: bytesResult.error }, { status: 500 });
 }
 
-async function handleVideoUrl(url: string, apiUser: string, apiSecret: string) {
+async function handleVideoUrl(url: string) {
   const dl = await downloadMedia(url);
   if (!dl.ok) return NextResponse.json({ error: dl.error }, { status: dl.status });
 
-  // Host served an image despite a video-looking URL — fall through to image scoring.
+  // Host returned an image despite a video-looking URL — fall through to image scoring.
   if (dl.contentType.startsWith('image/')) {
-    const r = await scoreImageBytes(apiUser, apiSecret, dl.bytes, dl.contentType, 'image');
-    if (!r.ok) return NextResponse.json({ error: r.error }, { status: 500 });
-    return NextResponse.json({ type: { deepfake: r.score } });
+    const quotaExhausted = new Set<string>();
+    const r = await tryBytesMode(dl.bytes, dl.contentType, 'image', quotaExhausted);
+    if ('score' in r) return NextResponse.json({ type: { deepfake: r.score } });
+    return NextResponse.json({ error: r.error }, { status: 500 });
   }
 
   let frames: Buffer[];
@@ -196,36 +634,32 @@ async function handleVideoUrl(url: string, apiUser: string, apiSecret: string) {
   }
 
   if (frames.length === 0) {
-    return NextResponse.json(
-      { error: 'لم يتم استخراج أي لقطات من الفيديو.' },
-      { status: 400 },
-    );
+    return NextResponse.json({ error: 'لم يتم استخراج أي لقطات من الفيديو.' }, { status: 400 });
   }
 
-  const results = await Promise.all(
-    frames.map((bytes, i) =>
-      scoreImageBytes(apiUser, apiSecret, bytes, 'image/jpeg', `frame_${i}.jpg`),
-    ),
-  );
-  const scores = results.flatMap((r) => (r.ok ? [r.score] : []));
+  // Score each frame — share the quota-exhausted set across frames so we don't
+  // keep retrying an exhausted provider for every subsequent frame.
+  const quotaExhausted = new Set<string>();
+  const scores: number[] = [];
+
+  for (let i = 0; i < frames.length; i++) {
+    const r = await tryBytesMode(frames[i], 'image/jpeg', `frame_${i}.jpg`, quotaExhausted);
+    if ('score' in r) scores.push(r.score);
+    else console.warn(`Frame ${i} failed:`, r.error);
+  }
 
   if (scores.length === 0) {
-    const firstError = results.find((r) => !r.ok) as
-      | { ok: false; error: string }
-      | undefined;
-    return NextResponse.json(
-      { error: firstError?.error || 'فشل تحليل جميع اللقطات' },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: 'فشل تحليل جميع اللقطات' }, { status: 500 });
   }
 
-  const worst = Math.max(...scores);
   return NextResponse.json({
-    type: { deepfake: worst },
+    type: { deepfake: Math.max(...scores) },
     frames_analyzed: scores.length,
     frames_sampled: frames.length,
   });
 }
+
+// ─────────────────────────────── POST handler ────────────────────────────────
 
 export async function POST(request: Request) {
   try {
@@ -235,23 +669,33 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'يرجى إدخال الرابط أولاً' }, { status: 400 });
     }
 
-    // Browsers silently strip whitespace from pasted URLs; Node fetch doesn't.
-    // Mirror that behavior so a clipboard newline doesn't turn into a 404.
     const url = rawUrl.replace(/\s+/g, '');
     if (!url) {
       return NextResponse.json({ error: 'يرجى إدخال الرابط أولاً' }, { status: 400 });
     }
 
-    const apiUser = process.env.SIGHTENGINE_API_USER;
-    const apiSecret = process.env.SIGHTENGINE_API_SECRET;
-    if (!apiUser || !apiSecret) {
-      return NextResponse.json({ error: 'مفاتيح API مفقودة' }, { status: 500 });
+    if (activeProviders().length === 0) {
+      return NextResponse.json(
+        { error: 'لا توجد مفاتيح API متاحة. أضف SIGHTENGINE_API_USER/SECRET أو HIVE_API_KEY إلى .env.local' },
+        { status: 500 },
+      );
+    }
+
+    if (isSocialMediaUrl(url)) {
+      return NextResponse.json(
+        {
+          error:
+            'روابط مواقع التواصل الاجتماعي (تويتر، انستغرام، يوتيوب، تيك توك...) غير مدعومة. ' +
+            'يرجى لصق رابط مباشر للصورة أو الفيديو (ينتهي بـ .jpg أو .mp4 وما شابه).',
+        },
+        { status: 400 },
+      );
     }
 
     if (isVideoUrl(url)) {
-      return handleVideoUrl(url, apiUser, apiSecret);
+      return handleVideoUrl(url);
     }
-    return handleImageUrl(url, apiUser, apiSecret);
+    return handleImageUrl(url);
   } catch (error) {
     console.error('API Error:', error);
     return NextResponse.json({ error: 'حدث خطأ غير متوقع' }, { status: 500 });
