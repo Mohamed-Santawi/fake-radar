@@ -81,12 +81,15 @@ export default function AnalyzePage() {
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}
                   className="block w-full bg-background border border-border rounded-xl py-4 pr-12 pl-4 text-foreground focus:ring-2 focus:ring-primary focus:border-primary transition-all text-left outline-none"
-                  placeholder="https://example.com/video.mp4"
+                  placeholder="https://example.com/image.jpg"
                   dir="ltr"
                   disabled={isLoading}
                   required
                 />
               </div>
+              <p className="text-xs text-foreground/40 mt-2 text-right">
+                للفيديو: يجب أن يكون الرابط مباشراً وأقل من 30 ميجابايت. روابط Google وAWS وYouTube محجوبة من جانب الخادم.
+              </p>
             </div>
 
             {error && (

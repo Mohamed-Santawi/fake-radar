@@ -532,9 +532,20 @@ async function downloadMedia(url: string): Promise<DownloadResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
 
+  // Include Referer matching the video's origin — passes referrer-based CDN checks.
+  const origin = (() => { try { return new URL(url).origin; } catch { return ''; } })();
+
   let res: Response;
   try {
-    res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA }, signal: controller.signal });
+    res = await fetch(url, {
+      headers: {
+        'User-Agent': BROWSER_UA,
+        'Accept': 'video/*,image/*,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        ...(origin ? { 'Referer': origin + '/' } : {}),
+      },
+      signal: controller.signal,
+    });
   } catch (e) {
     clearTimeout(timer);
     const isAbort = e instanceof Error && e.name === 'AbortError';
@@ -549,10 +560,13 @@ async function downloadMedia(url: string): Promise<DownloadResult> {
 
   if (!res.ok) {
     clearTimeout(timer);
+    const is403 = res.status === 403;
     return {
       ok: false,
       status: 400,
-      error: `تعذر تحميل الملف من المصدر (HTTP ${res.status}). قد يكون الرابط محمياً أو انتهت صلاحيته.`,
+      error: is403
+        ? 'رفض الخادم تحميل الملف (403). بعض مواقع التخزين السحابي (Google، AWS…) تحجب الطلبات القادمة من خوادم التطبيقات. جرب رفع الفيديو مباشرة أو استخدم رابطاً من مصدر آخر.'
+        : `تعذر تحميل الملف من المصدر (HTTP ${res.status}). قد يكون الرابط محمياً أو انتهت صلاحيته.`,
     };
   }
 
