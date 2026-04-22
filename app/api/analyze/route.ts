@@ -316,11 +316,18 @@ function createRealityDefenderProvider(name: string, envVar: string): Provider {
       const apiKey = process.env[envVar]!;
       const authHeader = { 'X-API-KEY': apiKey };
 
+      // Reality Defender throws 415 Unsupported Media Type if the extension is .bin or unrecognized.
+      let safeExt = 'jpg';
+      if (contentType.includes('png')) safeExt = 'png';
+      else if (contentType.includes('webp')) safeExt = 'webp';
+      else if (contentType.includes('mp4') || contentType.includes('video')) safeExt = 'mp4';
+      const safeFilename = `media.${safeExt}`;
+
       // Step 1: request a presigned S3 upload URL
       const presignRes = await fetch(`${RD_BASE}/api/files/aws-presigned`, {
         method: 'POST',
         headers: { ...authHeader, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName: filename }),
+        body: JSON.stringify({ fileName: safeFilename }),
       });
       let presignData: unknown;
       try { presignData = await presignRes.json(); } catch { presignData = null; }
