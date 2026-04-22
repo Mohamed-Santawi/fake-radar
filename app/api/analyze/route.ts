@@ -668,9 +668,9 @@ async function handleImageUrl(url: string) {
 
   const bytesResult = await tryBytesMode(dl.bytes, dl.contentType, 'image', quotaExhausted);
   if ('score' in bytesResult) {
-    return NextResponse.json({ type: { deepfake: bytesResult.score }, provider: bytesResult.provider });
+    return NextResponse.json({ type: { deepfake: bytesResult.score }, provider: bytesResult.provider, debug_errors: bytesResult.errors });
   }
-  return NextResponse.json({ error: bytesResult.error }, { status: 500 });
+  return NextResponse.json({ error: bytesResult.error, debug_errors: bytesResult.providerErrors }, { status: 500 });
 }
 
 async function handleVideoUrl(url: string) {
@@ -688,8 +688,8 @@ async function handleVideoUrl(url: string) {
   if (dl.contentType.startsWith('image/')) {
     const quotaExhausted = new Set<string>();
     const r = await tryBytesMode(dl.bytes, dl.contentType, 'image', quotaExhausted);
-    if ('score' in r) return NextResponse.json({ type: { deepfake: r.score }, provider: r.provider });
-    return NextResponse.json({ error: r.error }, { status: 500 });
+    if ('score' in r) return NextResponse.json({ type: { deepfake: r.score }, provider: r.provider, debug_errors: r.errors });
+    return NextResponse.json({ error: r.error, debug_errors: r.providerErrors }, { status: 500 });
   }
 
   let frames: Buffer[];
