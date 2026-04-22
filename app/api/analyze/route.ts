@@ -341,7 +341,7 @@ function createRealityDefenderProvider(name: string, envVar: string): Provider {
       const uploadRes = await fetch(signedUrl, {
         method: 'PUT',
         headers: { 'Content-Type': contentType },
-        body: new Blob([new Uint8Array(bytes)], { type: contentType }),
+        body: bytes,
       });
       if (!uploadRes.ok) {
         return { ok: false, quota: false, error: `RealityDefender S3 upload HTTP ${uploadRes.status}` };
@@ -425,7 +425,7 @@ async function tryUrlMode(
       continue;
     }
 
-    if (r.ok) return { score: r.score, provider: p.name };
+    if (r.ok) return { score: r.score, provider: p.name, errors: {} };
 
     if (r.quota) {
       console.warn(`${p.name}: quota exhausted, trying next provider`);
@@ -453,7 +453,7 @@ async function tryBytesMode(
   contentType: string,
   filename: string,
   quotaExhausted: Set<string>,
-): Promise<{ score: number; provider: string } | { error: string }> {
+): Promise<{ score: number; provider: string; errors?: Record<string, string> } | { error: string; providerErrors?: Record<string, string> }> {
   const providers = activeProviders();
 
   if (providers.length === 0) {
@@ -461,6 +461,7 @@ async function tryBytesMode(
   }
 
   let lastError = 'فشل تحليل المحتوى';
+  const errors: Record<string, string> = {};
 
   for (const p of providers) {
     if (quotaExhausted.has(p.name)) continue;
@@ -471,29 +472,32 @@ async function tryBytesMode(
     } catch (e) {
       console.warn(`${p.name} scoreBytes threw:`, e);
       lastError = `${p.name}: خطأ غير متوقع`;
+      errors[p.name] = e instanceof Error ? e.message : String(e);
       continue;
     }
 
-    if (r.ok) return { score: r.score, provider: p.name };
+    if (r.ok) return { score: r.score, provider: p.name, errors };
 
     if (r.quota) {
       console.warn(`${p.name}: quota exhausted, trying next provider`);
       quotaExhausted.add(p.name);
       lastError = `انتهت الحصة المجانية لـ ${p.name}`;
+      errors[p.name] = 'Quota exhausted';
       continue;
     }
 
     // Hard error — log and continue to next provider.
     console.warn(`${p.name} scoreBytes error:`, r.error);
-    lastError = r.error;
+    lastError = r.error || 'Unknown error';
+    errors[p.name] = r.error || 'Unknown error';
   }
 
   const allExhausted = providers.every((p) => quotaExhausted.has(p.name));
   if (allExhausted) {
-    return { error: 'انتهت الحصة المجانية لجميع مزودي الخدمة. جدد اشتراكك أو أضف مفتاح API جديد.' };
+    return { error: 'انتهت الحصة المجانية لجميع مزودي الخدمة. جدد اشتراكك أو أضف مفتاح API جديد.', providerErrors: errors };
   }
 
-  return { error: lastError };
+  return { error: lastError, providerErrors: errors };
 }
 
 // ────────────────────────── Media download helper ────────────────────────────
