@@ -341,7 +341,7 @@ function createRealityDefenderProvider(name: string, envVar: string): Provider {
       const uploadRes = await fetch(signedUrl, {
         method: 'PUT',
         headers: { 'Content-Type': contentType },
-        body: bytes,
+        body: new Uint8Array(bytes),
       });
       if (!uploadRes.ok) {
         return { ok: false, quota: false, error: `RealityDefender S3 upload HTTP ${uploadRes.status}` };
