@@ -323,7 +323,7 @@ function createRealityDefenderProvider(name: string, envVar: string): Provider {
         await writeFile(filePath, bytes);
         const result = await rd.detect(
           { filePath },
-          { maxAttempts: 6, pollingInterval: 5000 },
+          { maxAttempts: 2, pollingInterval: 5000 },
         );
 
         // SDK returns NaN when finalScore is undefined (e.g. unsupported media or
