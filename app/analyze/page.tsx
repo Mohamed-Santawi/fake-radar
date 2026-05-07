@@ -33,7 +33,10 @@ export default function AnalyzePage() {
         throw new Error(data.error || "حدث خطأ غير متوقع");
       }
 
-      const deepfakeScore = data.type?.deepfake || 0;
+      const deepfakeScore = data.type?.deepfake;
+      if (!Number.isFinite(deepfakeScore)) {
+        throw new Error("لم يتمكن أي مزود من تحليل هذا المحتوى، يرجى المحاولة برابط مختلف");
+      }
       const isFake = deepfakeScore > 0.5;
       const provider = data.provider || 'unknown';
 

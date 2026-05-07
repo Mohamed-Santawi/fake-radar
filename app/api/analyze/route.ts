@@ -326,11 +326,14 @@ function createRealityDefenderProvider(name: string, envVar: string): Provider {
           { maxAttempts: 6, pollingInterval: 5000 },
         );
 
-        if (result.score === null) {
+        // SDK returns NaN when finalScore is undefined (e.g. unsupported media or
+        // still ANALYZING after maxAttempts). NaN === null is false, so we must
+        // explicitly reject non-finite values — they would silently JSON-serialize to null.
+        if (!Number.isFinite(result.score)) {
           return { ok: false, quota: false, error: `RealityDefender: no score returned (status: ${result.status})` };
         }
 
-        return { ok: true, score: result.score };
+        return { ok: true, score: result.score as number };
       } catch (e) {
         if (e instanceof RealityDefenderError) {
           const isQuota = /limit|quota|trial|exceeded|credit|balance|plan|subscription|upgrade/i.test(e.message);
