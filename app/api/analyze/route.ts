@@ -4,6 +4,7 @@ import { mkdtemp, readdir, readFile, writeFile, rm, chmod } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import ffmpegPath from 'ffmpeg-static';
+import { RealityDefender, RealityDefenderError } from '@realitydefender/realitydefender';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -294,101 +295,58 @@ async function parseTruthscanResponse(res: Response): Promise<ProviderResult> {
 }
 
 // ─────────────────────────── Reality Defender ────────────────────────────────
-// Env var: REALITY_DEFENDER_API_KEY
-// Auth header: X-API-KEY (not Bearer)
-// Flow: presign → PUT raw bytes to S3 → poll until terminal status
-// Score: resultsSummary.metadata.finalScore (0-100) → divided by 100
-// Terminal statuses: AUTHENTIC | FAKE | SUSPICIOUS | NOT_APPLICABLE | UNABLE_TO_EVALUATE
-
-const POLL_ATTEMPTS = 6;
-const POLL_INTERVAL_MS = 5000;
-
-const RD_BASE = 'https://api.prd.realitydefender.xyz';
-const RD_TERMINAL = new Set(['AUTHENTIC', 'FAKE', 'SUSPICIOUS', 'NOT_APPLICABLE', 'UNABLE_TO_EVALUATE']);
+// Uses the official @realitydefender/realitydefender SDK.
+// Env vars: REALITY_DEFENDER_API_KEY, REALITY_DEFENDER_API_KEY_2, REALITY_DEFENDER_API_KEY_3
+// Flow: write bytes to a temp file → sdk.detect() (upload + poll) → map score
+// SDK score is already 0-1; null score means analysis didn't finish in time.
 
 function createRealityDefenderProvider(name: string, envVar: string): Provider {
   return {
     name,
     isAvailable: () => !!process.env[envVar],
-    // No scoreUrl — RD requires file upload; outer code downloads bytes first.
+    // No scoreUrl — RD SDK requires a local file path.
 
-    async scoreBytes(bytes, contentType, filename) {
+    async scoreBytes(bytes, contentType) {
       const apiKey = process.env[envVar]!;
-      const authHeader = { 'X-API-KEY': apiKey };
+      const rd = new RealityDefender({ apiKey });
 
-      // Reality Defender throws 415 Unsupported Media Type if the extension is .bin or unrecognized.
-      let safeExt = 'jpg';
-      if (contentType.includes('png')) safeExt = 'png';
-      else if (contentType.includes('webp')) safeExt = 'webp';
-      else if (contentType.includes('mp4') || contentType.includes('video')) safeExt = 'mp4';
-      const safeFilename = `media.${safeExt}`;
+      let ext = 'jpg';
+      if (contentType.includes('png')) ext = 'png';
+      else if (contentType.includes('webp')) ext = 'webp';
+      else if (contentType.includes('gif')) ext = 'gif';
+      else if (contentType.includes('mp4') || contentType.includes('video')) ext = 'mp4';
 
-      // Step 1: request a presigned S3 upload URL
-      const presignRes = await fetch(`${RD_BASE}/api/files/aws-presigned`, {
-        method: 'POST',
-        headers: { ...authHeader, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName: safeFilename }),
-      });
-      let presignData: unknown;
-      try { presignData = await presignRes.json(); } catch { presignData = null; }
+      const dir = await mkdtemp(join(tmpdir(), 'fakeradar-rd-'));
+      const filePath = join(dir, `media.${ext}`);
 
-      if (!presignRes.ok) {
-        return { ok: false, quota: isQuotaResponse(presignRes.status, presignData), error: `RealityDefender presign HTTP ${presignRes.status}` };
-      }
+      try {
+        await writeFile(filePath, bytes);
+        const result = await rd.detect(
+          { filePath },
+          { maxAttempts: 6, pollingInterval: 5000 },
+        );
 
-      type PresignResp = { response?: { signedUrl?: string; requestId?: string }; requestId?: string };
-      const pd = presignData as PresignResp;
-      const signedUrl = pd?.response?.signedUrl;
-      const requestId = pd?.response?.requestId ?? pd?.requestId;
-
-      if (!signedUrl) return { ok: false, quota: false, error: 'RealityDefender: no signedUrl in presign response' };
-      if (!requestId) return { ok: false, quota: false, error: 'RealityDefender: no requestId in presign response' };
-
-      // Step 2: upload raw bytes directly to S3 (no auth header — it's a presigned URL)
-      const uploadRes = await fetch(signedUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': contentType },
-        body: new Uint8Array(bytes),
-      });
-      if (!uploadRes.ok) {
-        return { ok: false, quota: false, error: `RealityDefender S3 upload HTTP ${uploadRes.status}` };
-      }
-
-      // Step 3: poll until a terminal status arrives (max POLL_ATTEMPTS × POLL_INTERVAL_MS)
-      for (let i = 0; i < POLL_ATTEMPTS; i++) {
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-
-        const pollRes = await fetch(`${RD_BASE}/api/media/users/${requestId}`, { headers: authHeader });
-        let pollData: unknown;
-        try { pollData = await pollRes.json(); } catch { pollData = null; }
-
-        if (!pollRes.ok) {
-          return { ok: false, quota: isQuotaResponse(pollRes.status, pollData), error: `RealityDefender poll HTTP ${pollRes.status}` };
+        if (result.score === null) {
+          return { ok: false, quota: false, error: `RealityDefender: no score returned (status: ${result.status})` };
         }
 
-        type PollResp = { resultsSummary?: { status?: string; metadata?: { finalScore?: number } } };
-        const { resultsSummary } = (pollData as PollResp) ?? {};
-        const status = resultsSummary?.status;
-
-        if (!status || !RD_TERMINAL.has(status)) continue; // still processing
-
-        if (status === 'NOT_APPLICABLE' || status === 'UNABLE_TO_EVALUATE') {
-          return { ok: false, quota: false, error: `RealityDefender: ${status}` };
+        return { ok: true, score: result.score };
+      } catch (e) {
+        if (e instanceof RealityDefenderError) {
+          const isQuota = /limit|quota|trial|exceeded|credit|balance|plan|subscription|upgrade/i.test(e.message);
+          return { ok: false, quota: isQuota, error: `RealityDefender: ${e.message}` };
         }
-
-        // finalScore 0-100 → normalize to 0-1
-        const raw = resultsSummary?.metadata?.finalScore;
-        const score = typeof raw === 'number' ? raw / 100 : status === 'FAKE' ? 1 : 0;
-        return { ok: true, score };
+        throw e;
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => {});
       }
-
-      return { ok: false, quota: false, error: 'RealityDefender: timed out waiting for result' };
     },
   };
 }
 
 const realityDefender1 = createRealityDefenderProvider('RealityDefender 1', 'REALITY_DEFENDER_API_KEY');
 const realityDefender2 = createRealityDefenderProvider('RealityDefender 2', 'REALITY_DEFENDER_API_KEY_2');
+const realityDefender3 = createRealityDefenderProvider('RealityDefender 3', 'REALITY_DEFENDER_API_KEY_3');
 
 // ─────────────────────────── Provider chain ──────────────────────────────────
 // Order: BitMind → Hive → TruthScan → RealityDefender → Sightengine/deepfake → Sightengine/ai-gen
@@ -397,6 +355,7 @@ const realityDefender2 = createRealityDefenderProvider('RealityDefender 2', 'REA
 const ALL_PROVIDERS: Provider[] = [
   realityDefender1,
   realityDefender2,
+  realityDefender3,
   bitmind1,
   bitmind2,
   truthscan,
@@ -798,6 +757,7 @@ export async function GET() {
     env: {
       has_rd1: !!process.env.REALITY_DEFENDER_API_KEY,
       has_rd2: !!process.env.REALITY_DEFENDER_API_KEY_2,
+      has_rd3: !!process.env.REALITY_DEFENDER_API_KEY_3,
       has_bm1: !!process.env.BITMIND_API_KEY,
       has_bm2: !!process.env.BITMIND_API_KEY_2,
     }

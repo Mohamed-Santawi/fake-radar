@@ -15,21 +15,49 @@ No test runner is configured.
 
 ## Required environment
 
-`.env.local` must define `SIGHTENGINE_API_USER` and `SIGHTENGINE_API_SECRET`. Without them, `/api/analyze` returns HTTP 500 with an Arabic error.
+`.env.local` must define at minimum `SIGHTENGINE_API_USER` and `SIGHTENGINE_API_SECRET`. Without them, `/api/analyze` returns HTTP 500 with an Arabic error. Full list of optional provider keys (missing keys disable that provider):
+
+| Variable | Provider |
+|---|---|
+| `SIGHTENGINE_API_USER`, `SIGHTENGINE_API_SECRET` | Sightengine deepfake + genai |
+| `BITMIND_API_KEY`, `BITMIND_API_KEY_2` | BitMind (two quota slots) |
+| `REALITY_DEFENDER_API_KEY`, `REALITY_DEFENDER_API_KEY_2` | Reality Defender (two quota slots) |
+| `TRUTHSCAN_API_KEY` | TruthScan (stub, not yet implemented) |
 
 ## Architecture
 
-FakeRadar ("رادار التزييف") is an Arabic RTL deepfake-detection UI that wraps Sightengine's deepfake model. App Router only; no `pages/` directory.
+FakeRadar ("رادار التزييف") is an Arabic RTL deepfake-detection UI. App Router only; no `pages/` directory. All server logic is in `app/api/analyze/route.ts` (~800 LOC) — there are no `lib/`, `utils/`, or `components/` directories.
 
-Request flow (`app/analyze/page.tsx` → `app/api/analyze/route.ts` → `app/result/page.tsx`):
+### Request flow
 
-1. Client (`/analyze`, client component) POSTs `{ url }` JSON to `/api/analyze`.
-2. Server route picks the endpoint by URL extension / content-type: images go to `/1.0/check.json`, videos (`.mp4/.mov/.webm/.avi/.mkv/.m4v` or `content-type: video/*`) go to `/1.0/video/check-sync.json`.
-3. **URL-first, proxy as fallback.** Server first posts the `url` field to Sightengine so their crawler fetches the media (sidesteps Vercel's function memory/payload limits entirely). Only if Sightengine returns a failure whose error string matches `/url|download|fetch|media|unreachable|host/i` does the route fall back to downloading the bytes itself (with a desktop `User-Agent`) and uploading them as `multipart/form-data` — capped at 30 MB. Every other Sightengine failure surfaces as-is.
-4. Video responses return per-frame scores at `data.data.frames[].type.deepfake`; the route collapses to the worst frame and reshapes the payload to `{ type: { deepfake } }` so the client contract stays identical for images and videos.
-5. Client reads `data.type.deepfake` (0–1), thresholds at `> 0.5`, and `router.push`es `/result?score=<float>&status=fake|real`. `/result` is a client component that reads `useSearchParams()` inside a `<Suspense>` boundary (required by Next's App Router for CSR bailout).
+`app/analyze/page.tsx` → `app/api/analyze/route.ts` → `app/result/page.tsx`
+
+1. Client (`/analyze`) POSTs `{ url }` JSON to `/api/analyze`.
+2. Route normalises the URL: file-share links (e.g. pixeldrain.com) are rewritten to direct-download URLs. Social-media domains (Twitter, Instagram, YouTube, TikTok, Reddit, LinkedIn) are rejected immediately with an Arabic error. Data URIs are decoded inline.
+3. Media type is detected by URL extension: `.mp4/.mov/.webm/.avi/.mkv/.m4v` → video; everything else → image. Videos are sampled at 5 frames (1 fps) using `ffmpeg-static`, which is spawned as a subprocess.
+4. Providers are tried in order; first `ok: true` wins. Each provider implements:
+   ```ts
+   interface Provider {
+     name: string;
+     isAvailable(): boolean;
+     scoreUrl?(url: string): Promise<ProviderResult>;   // optional; avoids proxy download
+     scoreBytes(bytes: Buffer, contentType: string, filename: string): Promise<ProviderResult>;
+   }
+   type ProviderResult = { ok: true; score: number } | { ok: false; quota: boolean; error: string };
+   ```
+   Active providers in order: RealityDefender ×2, BitMind ×2, TruthScan, Sightengine/deepfake, Sightengine/ai-generated.
+5. **URL-first, proxy as fallback.** `scoreUrl()` is called when available (Sightengine). Fallback to bytes-mode only when Sightengine returns a `url_fetch_failure` error. Bytes download is capped at 30 MB.
+6. Quota exhaustion is detected via HTTP 402/429 or a body regex `/limit|quota|trial|exceeded|credit|balance|plan|subscription|upgrade/i`. Exhausted providers are skipped; errors are collected in `providerErrors` and returned in the response for debugging.
+7. RealityDefender uses a presign → S3 upload → poll strategy (6 attempts × 5 s). BitMind uses a confidence field: `score = isAI ? confidence : 1 - confidence`.
+8. Video scores are collapsed to the worst frame; the response shape is normalised to `{ type: { deepfake: <0-1> }, provider: string }` for both images and videos.
+9. Client thresholds at `> 0.5` and `router.push`es `/result?score=<float>&status=fake|real&provider=<name>`. `/result` reads `useSearchParams()` inside a `<Suspense>` boundary (required by Next.js App Router for CSR bailout).
 
 All user-facing copy and error strings are Arabic; the layout sets `lang="ar" dir="rtl"` globally.
+
+## Vercel / build considerations
+
+- `next.config.ts` sets `serverExternalPackages: ["ffmpeg-static"]` to prevent bundling and `outputFileTracingIncludes` to include the ffmpeg binary in the Lambda layer.
+- Route runtime is explicitly `nodejs` with a 60 s max duration.
 
 ## Styling
 
